@@ -15,8 +15,6 @@ Documentação interativa disponível em: `http://localhost:8000/docs`
 
 ## Contrato da API (para o grupo)
 
-### Para o Simão (front-end)
-
 #### Gerar uma faixa
 ```
 POST /tracks/generate
@@ -64,8 +62,6 @@ POST /signals/mood
 
 ---
 
-### Para o J (gerador MIDI)
-
 O backend vai chamar o teu gerador com:
 ```
 POST http://<teu-host>/generate
@@ -76,17 +72,3 @@ POST http://<teu-host>/generate
 }
 ```
 Esperamos receber de volta pelo menos `track_id`, `bpm`, `mood`. Confirma se o formato está ok.
-
----
-
-## Estrutura do projeto
-
-```
-app/
-├── main.py          # Entrada da aplicação
-├── models.py        # Modelos de dados (Pydantic)
-├── storage.py       # Armazenamento em memória
-└── routers/
-    ├── signals.py   # Endpoints de sinais (feedback, mood)
-    └── tracks.py    # Endpoints de geração de faixas
-```
