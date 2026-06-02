@@ -8,7 +8,7 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Permite chamadas do front-end (Simão) durante desenvolvimento
+# Permite chamadas do front-end durante desenvolvimento
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
