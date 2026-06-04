@@ -4,7 +4,6 @@ from app.storage import store_feedback, store_mood_event, get_all_feedback
 
 router = APIRouter()
 
-
 @router.post("/feedback", summary="Registar feedback do utilizador")
 def post_feedback(signal: FeedbackSignal):
     """
@@ -14,7 +13,6 @@ def post_feedback(signal: FeedbackSignal):
     store_feedback(signal)
     return {"status": "ok", "received": signal}
 
-
 @router.post("/mood", summary="Registar mudança de mood")
 def post_mood(signal: MoodSignal):
     """
@@ -23,7 +21,6 @@ def post_mood(signal: MoodSignal):
     """
     store_mood_event(signal)
     return {"status": "ok", "received": signal}
-
 
 @router.get("/feedback", summary="Listar todos os sinais de feedback")
 def list_feedback():

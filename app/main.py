@@ -19,7 +19,6 @@ app.add_middleware(
 app.include_router(signals.router, prefix="/signals", tags=["Sinais"])
 app.include_router(tracks.router, prefix="/tracks", tags=["Faixas"])
 
-
 @app.get("/health", tags=["Sistema"])
 def health_check():
     return {"status": "ok"}
