@@ -29,6 +29,7 @@ class FeedbackSignal(BaseModel):
                 "track_id": "ABC123",
                 "mood": "calm",
                 "bpm": 75,
+                "density": 0.5,
                 "feedback": "like",
                 "timestamp": "2026-06-01T22:00:00"
             }

@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
 
-from routers import signals, tracks
+from routers import signals, tracks, optimize
 from adaptive_player import AdaptiveEngine
 from storage import store_starter_song, get_starter_songs
 
@@ -61,6 +61,7 @@ app.mount("/midi", StaticFiles(directory=MIDI_DIR), name="midi")
 
 app.include_router(signals.router, prefix="/signals", tags=["Sinais"])
 app.include_router(tracks.router, prefix="/tracks", tags=["Faixas"])
+app.include_router(optimize.router, prefix="/optimize", tags=["Otimização Bayesiana"])
 
 @app.get("/health", tags=["Sistema"])
 def health_check():
