@@ -13,6 +13,10 @@ MOOD_BPM_DEFAULTS = {
     Mood.calm: (60, 90),
     Mood.sad: (50, 80),
     Mood.energetic: (140, 180),
+    Mood.happy: (120, 160),
+    Mood.calm: (60, 90),
+    Mood.sad: (50, 80),
+    Mood.energetic: (140, 180),
 }
 
 TRACK_NAMES = [
@@ -20,27 +24,31 @@ TRACK_NAMES = [
     "Crystal Fog", "Ember Flow", "Soft Collapse", "Neon Quiet",
 ]
 
-@router.post("/generate", response_model=TrackResponse, summary="Gerar nova faixa")
-def generate_track(req: GenerateRequest, request: Request): # <-- Adicionar request: Request
-    """Gera uma nova faixa com base no mood usando o motor adaptativo."""
-    
-    # Ir buscar o motor ao state da app
+@router.post("/generate", response_model=TrackResponse, summary="Gerar nova faixa 100% adaptativa")
+def generate_track(request: Request): 
     engine = request.app.state.engine
     
-    # O motor espera uma string, e req.mood é um Enum, logo usamos .value
-    # O _generate_track já calcula os BPMs ideais internamente baseado no Bandit!
-    track_info = engine._generate_track(req.mood.value)
+    # 1. 🧠 O BANDIT ASSUME O CONTROLO TOTAL
+    chosen_mood, extra_info = engine._pick_mood()
+    print(f"🎲 O Bandit decidiu que o próximo mood será: {chosen_mood.upper()}")
     
-    # Construir a resposta com os dados reais gerados
+    # 2. Gerar a faixa com o mood estatisticamente escolhido
+    track_info = engine._generate_track(chosen_mood)
+    
+    filename = os.path.basename(track_info.path)
+    file_url = f"{request.base_url}midi/{filename}"
+    
+    print(f"✅ Faixa gerada: {filename} (Mood: {chosen_mood}, BPM: {track_info.bpm}, Density: {track_info.density})")
     return {
         "track_id": str(track_info.id),
-        "name": os.path.basename(track_info.path), # Nome real do ficheiro .mid
+        "name": filename,
         "bpm": int(track_info.bpm),
         "density": track_info.density,
-        "mood": req.mood,
+        "mood": chosen_mood,
+        "url": file_url
     }
 
-@router.post("/starter", summary="Adicionar starter song (usado pelo J)")
+@router.post("/starter", summary="Adicionar starter song")
 def add_starter_song(song: StarterSong):
     """
     Endpoint para injetar músicas iniciais na app.

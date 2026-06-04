@@ -5,13 +5,13 @@ from fastapi.staticfiles import StaticFiles
 import os
 
 from routers import signals, tracks
-from adaptive_player import AdaptiveEngine  # <-- Importar o motor
+from adaptive_player import AdaptiveEngine
+from storage import store_starter_song, get_starter_songs
 
 MIDI_DIR = "adaptive_midi"
 os.makedirs(MIDI_DIR, exist_ok=True)
 
-# Instanciar o motor globalmente (mas não chamar .start() para não abrir o CLI)
-engine = AdaptiveEngine(output_dir=MIDI_DIR, algo="thompson")
+engine = AdaptiveEngine(output_dir=MIDI_DIR, algo="ucb1")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -19,9 +19,21 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     print("🎵 Adaptive Engine iniciado e ligado à API!")
     
-    # Opcional: Podes chamar o get_pre_generated_batch() aqui no futuro
-    # para pré-carregar as starter songs.
+    starter_tracks = engine.get_pre_generated_batch()
     
+    # 3. Format and store them in memory so GET /tracks/starter works
+    for track in starter_tracks:
+        # We format the dictionary to match your StarterSong Pydantic model
+        song_data = {
+            "track_id": f"PRE_{track['id']}", # Make sure it's a string
+            "mood": track["mood"],
+            "bpm": int(track["bpm"]),
+            "density": 0.5, # Default density since it isn't in the filename
+            "name": track["filename"],
+            "url": f"/start_tracks/{track['filename']}"
+        }
+        store_starter_song(song_data)
+
     yield
     print("🛑 Servidor a desligar...")
 

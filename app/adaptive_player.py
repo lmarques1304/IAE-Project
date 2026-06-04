@@ -289,10 +289,10 @@ class AdaptiveEngine:
         
         # 1. Descobre a pasta exata onde este script (adaptive_player.py) está
         base_dir = os.path.dirname(os.path.abspath(__file__))
+        print(base_dir)
         
         # 2. Constrói o caminho fixo para a pasta "start_tracks"
         target_dir = os.path.join(base_dir, "start_tracks")
-
         if not os.path.exists(target_dir):
             print(f"  [!] Diretório '{target_dir}' não encontrado.")
             return tracks_data

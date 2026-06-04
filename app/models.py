@@ -60,6 +60,7 @@ class TrackResponse(BaseModel):
     bpm: int
     density: float
     name: str
+    url: str
 
 class StarterSong(BaseModel):
     track_id: str
@@ -67,3 +68,4 @@ class StarterSong(BaseModel):
     bpm: int
     density: float
     name: str
+    url: str
