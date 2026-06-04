@@ -3,18 +3,16 @@ from typing import Optional
 from datetime import datetime
 from enum import Enum
 
-
 class Mood(str, Enum):
-    feliz = "Feliz"
-    calmo = "Calmo"
-    triste = "Triste"
-    energetico = "Energético"
+    happy = "happy"
+    calm = "calm"
+    sad = "sad"
+    energetic = "energetic"
 
-
-class FeedbackValue(int, Enum):
-    like = 1
-    dislike = -1
-
+class FeedbackValue(str, Enum):
+    like = "like"
+    dislike = "dislike"
+    skip = "skip"
 
 # Sinais
 
@@ -29,18 +27,16 @@ class FeedbackSignal(BaseModel):
         json_schema_extra = {
             "example": {
                 "track_id": "ABC123",
-                "mood": "Calmo",
+                "mood": "calm",
                 "bpm": 75,
-                "feedback": 1,
+                "feedback": "like",
                 "timestamp": "2026-06-01T22:00:00"
             }
         }
 
-
 class MoodSignal(BaseModel):
     mood: Mood
     timestamp: Optional[datetime] = Field(default_factory=datetime.utcnow)
-
 
 # Faixas
 
@@ -52,14 +48,20 @@ class GenerateRequest(BaseModel):
     class Config:
         json_schema_extra = {
             "example": {
-                "mood": "Calmo",
+                "mood": "Calm",
                 "bpm": 75,
                 "density": 0.4
             }
         }
 
-
 class TrackResponse(BaseModel):
+    track_id: str
+    mood: Mood
+    bpm: int
+    density: float
+    name: str
+
+class StarterSong(BaseModel):
     track_id: str
     mood: Mood
     bpm: int
