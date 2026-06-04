@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
 
-from app.routers import signals, tracks
+from routers import signals, tracks
 from adaptive_player import AdaptiveEngine  # <-- Importar o motor
 
 MIDI_DIR = "adaptive_midi"

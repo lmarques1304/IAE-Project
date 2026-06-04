@@ -1,5 +1,5 @@
 from typing import List
-from app.models import FeedbackSignal, MoodSignal
+from models import FeedbackSignal, MoodSignal
 
 # Armazenamento em memória por agora
 # Na Etapa 2 pode ser substituído por SQLite ou PostgreSQL

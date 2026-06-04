@@ -2,8 +2,9 @@ import uuid
 import random
 from fastapi import APIRouter, Path, Request
 from typing import List
-from app.models import GenerateRequest, TrackResponse, StarterSong, Mood, FeedbackSignal, FeedbackValue
-from app.storage import store_starter_song, get_starter_songs, store_feedback
+from models import GenerateRequest, TrackResponse, StarterSong, Mood, FeedbackSignal, FeedbackValue
+from storage import store_starter_song, get_starter_songs, store_feedback
+import os
 
 router = APIRouter()
 

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Request # <-- Adicionar Request aqui
-from app.models import FeedbackSignal, MoodSignal
-from app.storage import store_feedback, store_mood_event, get_all_feedback
+from models import FeedbackSignal, MoodSignal
+from storage import store_feedback, store_mood_event, get_all_feedback
 
 router = APIRouter()
 
