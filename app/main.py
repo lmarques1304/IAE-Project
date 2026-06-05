@@ -11,7 +11,7 @@ from storage import store_starter_song, get_starter_songs
 MIDI_DIR = "adaptive_midi"
 os.makedirs(MIDI_DIR, exist_ok=True)
 
-engine = AdaptiveEngine(output_dir=MIDI_DIR, algo="ucb1")
+engine = AdaptiveEngine(output_dir=MIDI_DIR, algo="thompson")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
