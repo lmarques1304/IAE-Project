@@ -4,7 +4,7 @@ from scipy.optimize import minimize
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern, WhiteKernel
 from typing import Optional
-from app.storage import get_all_feedback
+from storage import get_all_feedback
 
 MOOD_BOUNDS = {
     "happy": {"bpm": (120, 160), "density": (0.1, 1.0)},

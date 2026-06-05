@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.bayesian_optimizer import optimizer
+from bayesian_optimizer import optimizer
 
 router = APIRouter()
 

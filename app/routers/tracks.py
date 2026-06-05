@@ -24,7 +24,7 @@ TRACK_NAMES = [
     "Crystal Fog", "Ember Flow", "Soft Collapse", "Neon Quiet",
 ]
 
-@router.post("/generate", response_model=TrackResponse, summary="Gerar nova faixa 100% adaptativa")
+@router.get("/generate", response_model=TrackResponse, summary="Enviar nova faixa 100% adaptativa")
 def generate_track(request: Request): 
     engine = request.app.state.engine
     
@@ -47,15 +47,6 @@ def generate_track(request: Request):
         "mood": chosen_mood,
         "url": file_url
     }
-
-@router.post("/starter", summary="Adicionar starter song")
-def add_starter_song(song: StarterSong):
-    """
-    Endpoint para injetar músicas iniciais na app.
-    O front-end usa GET /tracks/starter para as ir buscar.
-    """
-    store_starter_song(song.model_dump())
-    return {"status": "ok", "track_id": song.track_id}
 
 @router.get("/starter", response_model=List[StarterSong], summary="Buscar starter songs (usado pelo front-end)")
 def get_starter_songs_endpoint():
