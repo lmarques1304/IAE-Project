@@ -1,6 +1,7 @@
 import uuid
 import random
-from fastapi import APIRouter, Path, Request
+from fastapi import APIRouter, Path, Request, Query
+from typing import Optional
 from typing import List
 from models import GenerateRequest, TrackResponse, StarterSong, Mood, FeedbackSignal, FeedbackValue
 from storage import store_starter_song, get_starter_songs, store_feedback
@@ -26,16 +27,28 @@ TRACK_NAMES = [
 ]
 
 @router.get("/generate", response_model=TrackResponse, summary="Enviar nova faixa 100% adaptativa")
-def generate_track(request: Request): 
+def generate_track(
+    request: Request,
+    mood: Optional[str] = Query(
+        default=None,
+        description="Mood da faixa: happy | sad | energetic | calm. "
+                    "Se omitido, o Bandit escolhe automaticamente.",
+    ),
+):
     engine = request.app.state.engine
-    
-    # 1. 🧠 O BANDIT ASSUME O CONTROLO TOTAL
-    chosen_mood, extra_info = engine._pick_mood()
-    print(f"🎲 O Bandit decidiu que o próximo mood será: {chosen_mood.upper()}")
-    
-    # 2. Gerar a faixa com o mood estatisticamente escolhido
+
+    if mood is not None:
+        chosen_mood = mood
+        extra_info = {"source": "frontend_override"}
+        print(f"\n\n\n🎨 Mood definido pelo frontend: {chosen_mood.upper()}\n\n\n")
+
+    else:
+        chosen_mood, extra_info = engine._pick_mood()
+        print(f"🎲 O Bandit decidiu que o próximo mood será: {chosen_mood.upper()}")
+
+    # 2. Gerar a faixa com o mood escolhido
     track_info = engine._generate_track(chosen_mood)
-    
+
     filename = os.path.basename(track_info.path)
     print(f"✅ Faixa gerada: {filename} (Mood: {chosen_mood}, BPM: {track_info.bpm}, Density: {track_info.density})")
     print(track_info)
