@@ -18,6 +18,7 @@ class FeedbackValue(str, Enum):
 
 class FeedbackSignal(BaseModel):
     track_id: str = Field(..., example="ABC123")
+    track_name: str = Field(..., example="Happy_Tune.mid")
     mood: Mood
     bpm: int = Field(..., ge=40, le=200, example=90)
     feedback: FeedbackValue
@@ -27,6 +28,7 @@ class FeedbackSignal(BaseModel):
         json_schema_extra = {
             "example": {
                 "track_id": "ABC123",
+                "track_name": "Happy_Tune.mid",
                 "mood": "calm",
                 "bpm": 75,
                 "density": 0.5,

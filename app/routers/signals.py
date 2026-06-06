@@ -25,6 +25,8 @@ def post_feedback(signal: FeedbackSignal, request: Request): # <-- Adicionar req
         track_params=track_params, 
         feedback_value=signal.feedback.value
     )
+
+    print(signal)
     
     return {"status": "ok", "received": signal}
 

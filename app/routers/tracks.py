@@ -40,17 +40,22 @@ def generate_track(
     if mood is not None:
         chosen_mood = mood
         extra_info = {"source": "frontend_override"}
-        print(f"\n\n\n🎨 Mood definido pelo frontend: {chosen_mood.upper()}\n\n\n")
+        print(f"\n🎨 Mood definido pelo frontend: {chosen_mood.upper()}\n")
+
+        track_info = engine._generate_track_for_mood(chosen_mood)
+
+        filename = os.path.basename(track_info.path)
+        print(f"✅ Faixa gerada: {filename} (Mood: {chosen_mood}, BPM: {track_info.bpm}, Density: {track_info.density})")
 
     else:
-        chosen_mood, extra_info = engine._pick_mood()
-        print(f"🎲 O Bandit decidiu que o próximo mood será: {chosen_mood.upper()}")
+        params, extra_info = engine._pick_params()
+        chosen_mood = params.mood
 
-    # 2. Gerar a faixa com o mood escolhido
-    track_info = engine._generate_track(chosen_mood)
+        # 2. Gerar a faixa com o mood escolhido
+        track_info = engine._generate_track(params)
 
-    filename = os.path.basename(track_info.path)
-    print(f"✅ Faixa gerada: {filename} (Mood: {chosen_mood}, BPM: {track_info.bpm}, Density: {track_info.density})")
+        filename = os.path.basename(track_info.path)
+    print(f"✅ Faixa gerada: {filename} (Mood: {chosen_mood}, file64_size: {len(track_info.base64_file)} bytes)")
     print(track_info)
 
     return {
@@ -65,7 +70,9 @@ def generate_track(
 @router.get("/starter", response_model=List[StarterSong], summary="Buscar starter songs (usado pelo front-end)")
 def get_starter_songs_endpoint():
     """ Devolve todas as músicas iniciais. O front-end chama isto no arranque da aplicação. """
-    return get_starter_songs()
+    start_tracks = get_starter_songs()
+    print(start_tracks)
+    return start_tracks
 
 @router.post("/{track_id}/feedback", summary="Enviar feedback por track ID")
 def post_feedback_by_track(

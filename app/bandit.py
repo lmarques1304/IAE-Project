@@ -1,45 +1,131 @@
 """
 bandit.py
 ---------
-Multi-Armed Bandit
+Multi-Armed Bandit — espaço de parâmetros contínuos
 Projeto: Adaptive Music Experience (C2)
 
 Implementa:
-  - UCB1   — exploração baseada em incerteza (Upper Confidence Bound)
-  - Thompson Sampling — exploração Bayesiana via distribuição Beta
-  - RandomBandit      — baseline uniforme (sem aprendizagem)
-  - BanditLogger      — logging quantitativo de todas as decisões
-  - BanditEvaluator   — ablation study: adaptativo vs baseline
+  - ContinuousGaussianBandit — Thompson Sampling sobre parâmetros contínuos
+        Cada parâmetro (bpm, density, …) tem uma distribuição Normal independente
+        que é actualizada com cada reward via Bayesian update (Normal-Normal).
+  - RandomContinuousBandit   — baseline uniforme nos mesmos ranges (sem aprendizagem)
+  - BanditLogger             — logging quantitativo de todas as decisões
+  - BanditEvaluator          — ablation study: adaptativo vs baseline
 
 Integração com adaptive_player.py:
-    from bandit import ThompsonSamplingBandit, BanditLogger, MOODS
+    from bandit import ContinuousGaussianBandit, BanditLogger, MusicParams
 
-    bandit = ThompsonSamplingBandit(arms=MOODS)
-    logger = BanditLogger("thompson")
+    bandit = ContinuousGaussianBandit()
+    logger = BanditLogger("GaussianTS")
 
-    mood, extra = bandit.select_arm()           # escolhe mood
+    params, extra = bandit.select_params()      # escolhe parâmetros
     reward = compute_reward(signals)
-    bandit.update(mood, reward)
-    logger.log(bandit, mood, reward, extra)
+    bandit.update(params, reward)
+    logger.log(bandit, params, reward, extra)
 
 Dependências:
     pip install numpy
 """
 
-import math
 import json
 import time
 import numpy as np
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 
 # ---------------------------------------------------------------------------
-# Constantes partilhadas
+# Definição do espaço de parâmetros
 # ---------------------------------------------------------------------------
 
-MOODS = ["happy", "sad", "calm", "energetic"]
+def _infer_mood(bpm: float, density: float, complexity: float, scale: str) -> str:
+    """
+    Mapeia os parâmetros escolhidos pelo bandit num mood legível.
+
+    Regras (por ordem de prioridade):
+      energetic — bpm alto E densidade alta
+      happy     — bpm moderado-alto, escala maior/mixolídio
+      sad       — escala menor/dórico OU bpm baixo + densidade baixa
+      calm      — tudo o resto (bpm baixo, pouca densidade)
+    """
+    is_minor_scale = scale in ("minor", "dorian")
+    is_major_scale = scale in ("major", "mixolydian", "pentatonic_major")
+
+    if bpm >= 115 and density >= 0.55:
+        return "energetic"
+    if bpm >= 95 and density >= 0.4 and is_major_scale:
+        return "happy"
+    if is_minor_scale or (bpm < 85 and density < 0.35):
+        return "sad"
+    return "calm"
+
+
+@dataclass
+class MusicParams:
+    """
+    Parâmetros contínuos de geração musical escolhidos pelo bandit.
+    Todos os valores são escalares prontos a passar ao gerador.
+    """
+    scale:               str   = "major"
+    bpm:                 float = 85.0
+    density:             float = 0.3
+    complexity:          float = 0.2
+    octave:              float = 4.5    # valor contínuo; arredonda-se ao usar
+    note_duration:       float = 0.7
+    velocity:            float = 60.0
+
+    @property
+    def mood(self) -> str:
+        """Mood inferido automaticamente a partir dos parâmetros escolhidos."""
+        return _infer_mood(self.bpm, self.density, self.complexity, self.scale)
+
+    def to_dict(self) -> dict:
+        return {
+            "mood":          self.mood,
+            "scale":         self.scale,
+            "bpm":           round(self.bpm, 1),
+            "density":       round(self.density, 3),
+            "complexity":    round(self.complexity, 3),
+            "octave":        round(self.octave, 2),
+            "note_duration": round(self.note_duration, 3),
+            "velocity":      round(self.velocity, 1),
+        }
+
+    def to_generator_dict(self) -> dict:
+        """Formato pronto a passar ao engine de geração MIDI."""
+        return {
+            "scale":               self.scale,
+            "bpm_range":           (max(60, self.bpm - 5), self.bpm + 5),
+            "density":             round(self.density, 3),
+            "complexity":          round(self.complexity, 3),
+            "octave_range":        (max(2, int(self.octave)), min(7, int(self.octave) + 1)),
+            "note_duration_range": (
+                max(0.1, self.note_duration - 0.15),
+                self.note_duration + 0.15,
+            ),
+            "velocity_range":      (
+                max(20, int(self.velocity) - 10),
+                min(127, int(self.velocity) + 10),
+            ),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Espaço de busca — ranges e escala de cada parâmetro
+# ---------------------------------------------------------------------------
+
+# Cada entrada: (min, max, prior_mean, prior_std)
+# prior_mean = centro do range; prior_std = range/4 (cobre ~95% do espaço)
+PARAM_SPACE: dict[str, tuple[float, float, float, float]] = {
+    "bpm":           (70.0,  140.0,  100.0,  17.5),
+    "density":       (0.1,   0.9,    0.5,    0.2),
+    "complexity":    (0.1,   0.9,    0.5,    0.2),
+    "octave":        (3.0,   6.0,    4.5,    0.75),
+    "note_duration": (0.15,  1.2,    0.65,   0.26),
+    "velocity":      (30.0,  110.0,  70.0,   20.0),
+}
+
+SCALES = ["major", "minor", "dorian", "mixolydian", "pentatonic_major", "pentatonic_minor"]
 
 
 # ---------------------------------------------------------------------------
@@ -48,224 +134,299 @@ MOODS = ["happy", "sad", "calm", "energetic"]
 
 @dataclass
 class Decision:
-    """Registo imutável de uma decisão do bandit (para logging e avaliação)."""
-    step:               int
-    timestamp:          float
-    algorithm:          str
-    chosen_arm:         str    # mood escolhido
-    reward:             float  # recompensa recebida
-    cumulative_reward:  float
-    arm_stats:          dict   # snapshot das estatísticas de cada arm
-    extra:              dict = field(default_factory=dict)
+    """Registo imutável de uma decisão do bandit."""
+    step:              int
+    timestamp:         float
+    algorithm:         str
+    params:            dict
+    reward:            float
+    cumulative_reward: float
+    arm_stats:         dict
+    extra:             dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
 # ---------------------------------------------------------------------------
-# Braço individual (mood)
+# Braço Gaussiano — um por parâmetro contínuo
 # ---------------------------------------------------------------------------
 
-class BanditArm:
+class GaussianArm:
     """
-    Estatísticas de um braço (= um mood).
+    Representa a distribuição de um parâmetro contínuo.
 
-    Mantém:
-      - plays / total_reward   → para UCB1 e médias
-      - alpha / beta           → para Thompson Sampling (distribuição Beta)
+    Usa um Bayesian update Normal-Normal (variância conhecida):
+        posterior_mean = (prior_mean/prior_var + obs_sum/noise_var)
+                         / (1/prior_var + n/noise_var)
+        posterior_var  = 1 / (1/prior_var + n/noise_var)
 
-    Os priors alpha=1, beta=1 equivalem a uma distribuição uniforme no arranque,
-    garantindo que todos os braços são explorados antes de qualquer feedback.
+    Interpretação:
+      - mu  → estimativa actual do valor óptimo do parâmetro
+      - var → incerteza; encolhe à medida que acumulamos dados
+      - noise_var → variância do reward (quanto o utilizador é inconsistente)
     """
 
-    def __init__(self, name: str):
-        self.name         = name
-        self.plays        = 0
-        self.total_reward = 0.0
-        self.alpha        = 1.0   # prior Beta — "1 sucesso imaginário"
-        self.beta         = 1.0   # prior Beta — "1 falha imaginária"
+    NOISE_VAR = 0.15   # variância assumida do reward — ajusta se necessário
 
-    @property
-    def mean_reward(self) -> float:
-        return self.total_reward / self.plays if self.plays > 0 else 0.0
+    def __init__(self, name: str, lo: float, hi: float, prior_mean: float, prior_std: float):
+        self.name      = name
+        self.lo        = lo
+        self.hi        = hi
+        self.mu        = prior_mean
+        self.var       = prior_std ** 2
+        self._obs_sum  = 0.0   # Σ (reward * param_value) — suficiente estatística
+        self._n        = 0
 
-    @property
-    def uncertainty(self) -> float:
-        """Variância da Beta — mede o quanto ainda não sabemos sobre este braço."""
-        a, b = self.alpha, self.beta
-        return (a * b) / ((a + b) ** 2 * (a + b + 1))
+    def sample(self, rng: np.random.Generator) -> float:
+        """Thompson Sampling: amostra da posterior e clipa ao range."""
+        value = float(rng.normal(self.mu, np.sqrt(self.var)))
+        return float(np.clip(value, self.lo, self.hi))
 
-    def update(self, reward: float):
+    def update(self, value: float, reward: float):
         """
-        Atualiza com recompensa em [-1, 1].
-        Normaliza para [0, 1] antes de actualizar a Beta.
+        Bayesian update: a observação é (value, reward).
+        Interpretamos reward como sinal de quão bom foi este valor.
+        Actualizamos a média posterior na direcção de 'value' ponderada pelo reward.
+
+        Formulação simplificada mas eficaz:
+          - reward > 0 → puxa a média em direcção ao valor usado
+          - reward < 0 → afasta a média do valor usado
+          - magnitude  → velocidade de aprendizagem
         """
-        self.plays        += 1
-        self.total_reward += reward
-        r_norm   = (reward + 1.0) / 2.0          # [-1,1] → [0,1]
-        self.alpha += r_norm
-        self.beta  += (1.0 - r_norm)
+        self._n       += 1
+        self._obs_sum += reward * value
+
+        # Actualização da variância posterior
+        precision_prior = 1.0 / self.var
+        precision_data  = self._n / self.NOISE_VAR
+        self.var        = 1.0 / (precision_prior + precision_data)
+
+        # Actualização da média posterior
+        prior_contrib = precision_prior * self.mu
+        data_contrib  = (self._obs_sum / self.NOISE_VAR)
+        self.mu       = self.var * (prior_contrib + data_contrib)
+        self.mu       = float(np.clip(self.mu, self.lo, self.hi))
 
     def to_dict(self) -> dict:
         return {
-            "name":        self.name,
-            "plays":       self.plays,
-            "mean_reward": round(self.mean_reward, 4),
-            "alpha":       round(self.alpha, 3),
-            "beta":        round(self.beta,  3),
-            "uncertainty": round(self.uncertainty, 5),
+            "name":  self.name,
+            "mu":    round(self.mu,   4),
+            "std":   round(float(np.sqrt(self.var)), 4),
+            "plays": self._n,
         }
 
 
 # ---------------------------------------------------------------------------
-# Interface base
+# Braço discreto para a escala musical
 # ---------------------------------------------------------------------------
 
-class BaseBandit(ABC):
-    """Interface comum — todos os bandits partilham select_arm / update / reset."""
+class ScaleArm:
+    """
+    Thompson Sampling Beta para a escala (variável categórica).
+    Cada escala tem o seu par (alpha, beta) — idêntico ao BanditArm original.
+    """
 
-    name: str = "base"
+    def __init__(self, scales: list[str]):
+        self.scales = scales
+        self.alpha  = {s: 1.0 for s in scales}
+        self.beta   = {s: 1.0 for s in scales}
 
-    def __init__(self, arms: list[str], seed: Optional[int] = None):
-        self.arms: dict[str, BanditArm] = {a: BanditArm(a) for a in arms}
-        self.rng               = np.random.default_rng(seed)
-        self.step              = 0
+    def sample(self, rng: np.random.Generator) -> str:
+        samples = {s: float(rng.beta(self.alpha[s], self.beta[s])) for s in self.scales}
+        return max(samples, key=samples.get)
+
+    def update(self, scale: str, reward: float):
+        r_norm = (reward + 1.0) / 2.0       # [-1,1] → [0,1]
+        self.alpha[scale] += r_norm
+        self.beta[scale]  += (1.0 - r_norm)
+
+    def to_dict(self) -> dict:
+        return {
+            s: {
+                "alpha": round(self.alpha[s], 3),
+                "beta":  round(self.beta[s],  3),
+                "mean":  round(self.alpha[s] / (self.alpha[s] + self.beta[s]), 3),
+            }
+            for s in self.scales
+        }
+
+
+# ---------------------------------------------------------------------------
+# Bandit principal — espaço contínuo
+# ---------------------------------------------------------------------------
+
+class ContinuousGaussianBandit:
+    """
+    Gaussian Thompson Sampling sobre o espaço de parâmetros musicais.
+
+    Cada parâmetro numérico tem um GaussianArm independente.
+    A escala musical tem um ScaleArm (Beta por categoria).
+
+    Após cada faixa:
+        params, extra = bandit.select_params()
+        # ... gera e reproduz a faixa ...
+        bandit.update(params, reward)
+
+    O bandit converge gradualmente para a zona do espaço que maximiza o reward,
+    mantendo exploração via amostras da posterior.
+    """
+
+    name = "GaussianTS"
+
+    def __init__(self, seed: Optional[int] = None):
+        self.rng    = np.random.default_rng(seed)
+        self.step   = 0
         self.cumulative_reward = 0.0
 
-    @abstractmethod
-    def select_arm(self) -> tuple[str, dict]:
-        """
-        Escolhe um braço segundo a estratégia do algoritmo.
-        Devolve (arm_name, info_extra) — o extra é logado para análise.
-        """
-        ...
+        # Um GaussianArm por parâmetro contínuo
+        self.param_arms: dict[str, GaussianArm] = {
+            name: GaussianArm(name, lo, hi, mu, std)
+            for name, (lo, hi, mu, std) in PARAM_SPACE.items()
+        }
 
-    def update(self, arm_name: str, reward: float):
-        """Regista a recompensa e avança o contador de passos."""
-        self.arms[arm_name].update(reward)
+        # ScaleArm para a variável categórica
+        self.scale_arm = ScaleArm(SCALES)
+
+    # ------------------------------------------------------------------
+    # Interface principal
+    # ------------------------------------------------------------------
+
+    def select_params(self) -> tuple[MusicParams, dict]:
+        """
+        Amostra um conjunto de parâmetros musicais da posterior actual.
+        Devolve (MusicParams, info_extra) — o extra é logado para análise.
+        """
+        sampled: dict[str, float] = {
+            name: arm.sample(self.rng)
+            for name, arm in self.param_arms.items()
+        }
+        scale = self.scale_arm.sample(self.rng)
+
+        params = MusicParams(
+            scale         = scale,
+            bpm           = sampled["bpm"],
+            density       = sampled["density"],
+            complexity    = sampled["complexity"],
+            octave        = sampled["octave"],
+            note_duration = sampled["note_duration"],
+            velocity      = sampled["velocity"],
+        )
+
+        extra = {
+            "inferred_mood":   params.mood,
+            "posterior_means": {n: round(a.mu, 4) for n, a in self.param_arms.items()},
+            "posterior_stds":  {n: round(float(np.sqrt(a.var)), 4) for n, a in self.param_arms.items()},
+            "scale_probs":     {
+                s: round(self.scale_arm.alpha[s] /
+                         (self.scale_arm.alpha[s] + self.scale_arm.beta[s]), 3)
+                for s in SCALES
+            },
+        }
+        return params, extra
+
+    def update(self, params: MusicParams, reward: float):
+        """Regista o reward e actualiza todas as distribuições posteriores."""
+        self.param_arms["bpm"].update(params.bpm, reward)
+        self.param_arms["density"].update(params.density, reward)
+        self.param_arms["complexity"].update(params.complexity, reward)
+        self.param_arms["octave"].update(params.octave, reward)
+        self.param_arms["note_duration"].update(params.note_duration, reward)
+        self.param_arms["velocity"].update(params.velocity, reward)
+        self.scale_arm.update(params.scale, reward)
+
         self.cumulative_reward += reward
         self.step              += 1
 
     def arm_stats(self) -> dict:
-        return {n: arm.to_dict() for n, arm in self.arms.items()}
+        return {
+            "params": {n: a.to_dict() for n, a in self.param_arms.items()},
+            "scales": self.scale_arm.to_dict(),
+        }
 
     def reset(self):
-        for arm in self.arms.values():
-            arm.plays        = 0
-            arm.total_reward = 0.0
-            arm.alpha        = 1.0
-            arm.beta         = 1.0
+        self.__init__(seed=None)
+
+    # ------------------------------------------------------------------
+    # Exploração forçada (cold start)
+    # ------------------------------------------------------------------
+
+    def cold_start_params(self, n: int = 8) -> list[MusicParams]:
+        """
+        Gera n conjuntos de parâmetros diversificados para cold start.
+        Usa Latin Hypercube Sampling para cobrir o espaço uniformemente
+        sem depender de feedback.
+        """
+        result: list[MusicParams] = []
+        for i in range(n):
+            sampled = {}
+            for name, (lo, hi, _, _) in PARAM_SPACE.items():
+                lo_slice = lo + (hi - lo) * i / n
+                hi_slice = lo + (hi - lo) * (i + 1) / n
+                sampled[name] = float(self.rng.uniform(lo_slice, hi_slice))
+            scale = SCALES[i % len(SCALES)]
+            result.append(MusicParams(
+                scale         = scale,
+                bpm           = sampled["bpm"],
+                density       = sampled["density"],
+                complexity    = sampled["complexity"],
+                octave        = sampled["octave"],
+                note_duration = sampled["note_duration"],
+                velocity      = sampled["velocity"],
+            ))
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Baseline aleatório (para ablation study)
+# ---------------------------------------------------------------------------
+
+class RandomContinuousBandit:
+    """
+    Baseline — amostragem uniforme aleatória dentro dos ranges.
+    Não aprende. Comparado com ContinuousGaussianBandit no ablation study.
+    """
+
+    name = "RandomContinuous"
+
+    def __init__(self, seed: Optional[int] = None):
+        self.rng               = np.random.default_rng(seed)
         self.step              = 0
         self.cumulative_reward = 0.0
 
-
-# ---------------------------------------------------------------------------
-# UCB1
-# ---------------------------------------------------------------------------
-
-class UCB1Bandit(BaseBandit):
-    """
-    UCB1 — Upper Confidence Bound.
-
-    Fórmula por braço i:
-        score(i) = mean_reward(i) + c * sqrt( ln(t) / plays(i) )
-
-    onde t = total de plays e c controla o trade-off exploração/exploitação.
-
-    c > 1  → mais aventureiro (explora braços menos visitados)
-    c < 1  → mais conservador (explora mais o que já conhece)
-    """
-
-    name = "UCB1"
-
-    def __init__(self, arms: list[str], c: float = 1.5, seed: Optional[int] = None):
-        super().__init__(arms, seed)
-        self.c = c
-
-    def select_arm(self) -> tuple[str, dict]:
-        total = self.step + 1   # +1 evita log(0) no primeiro passo
-        scores: dict[str, float] = {}
-
-        for name, arm in self.arms.items():
-            if arm.plays == 0:
-                scores[name] = float("inf")  # garante que todos são visitados primeiro
-            else:
-                exploit = arm.mean_reward
-                explore = self.c * math.sqrt(math.log(total) / arm.plays)
-                scores[name] = exploit + explore
-
-        chosen = max(scores, key=scores.get)
-        extra  = {
-            "ucb_scores": {
-                k: round(v, 4) if v != float("inf") else "∞"
-                for k, v in scores.items()
-            }
+    def select_params(self) -> tuple[MusicParams, dict]:
+        sampled = {
+            name: float(self.rng.uniform(lo, hi))
+            for name, (lo, hi, _, _) in PARAM_SPACE.items()
         }
-        return chosen, extra
+        scale = str(self.rng.choice(SCALES))
+        params = MusicParams(scale=scale, **sampled)
+        return params, {"strategy": "uniform_random"}
+
+    def update(self, params: MusicParams, reward: float):
+        self.cumulative_reward += reward
+        self.step              += 1
+
+    def arm_stats(self) -> dict:
+        return {}
+
+    def reset(self):
+        self.__init__(seed=None)
 
 
 # ---------------------------------------------------------------------------
-# Thompson Sampling
-# ---------------------------------------------------------------------------
-
-class ThompsonSamplingBandit(BaseBandit):
-    """
-    Thompson Sampling com distribuição Beta.
-
-    Para cada braço i, amostra θ_i ~ Beta(alpha_i, beta_i).
-    Escolhe o braço com maior θ_i.
-
-    Vantagem sobre UCB1: a exploração é proporcional à incerteza real
-    estimada, não a uma fórmula fixa. Funciona muito bem com poucas amostras
-    — ideal para o cold start deste projeto.
-
-    A distribuição Beta começa em Beta(1,1) = uniforme → nenhum mood é
-    favorecido antes de haver dados.
-    """
-
-    name = "ThompsonSampling"
-
-    def select_arm(self) -> tuple[str, dict]:
-        samples: dict[str, float] = {}
-        for name, arm in self.arms.items():
-            samples[name] = float(self.rng.beta(arm.alpha, arm.beta))
-
-        chosen = max(samples, key=samples.get)
-        extra  = {"ts_samples": {k: round(v, 4) for k, v in samples.items()}}
-        return chosen, extra
-
-
-# ---------------------------------------------------------------------------
-# Baseline aleatório
-# ---------------------------------------------------------------------------
-
-class RandomBandit(BaseBandit):
-    """
-    Baseline — seleção uniforme aleatória.
-    Não aprende. Serve para o ablation study:
-    compara-se a recompensa acumulada do adaptativo vs este baseline.
-    """
-
-    name = "Random"
-
-    def select_arm(self) -> tuple[str, dict]:
-        chosen = str(self.rng.choice(list(self.arms.keys())))
-        return chosen, {"strategy": "uniform_random"}
-
-
-# ---------------------------------------------------------------------------
-# Logger de decisões
+# Logger de decisões (compatível com ambos os bandits)
 # ---------------------------------------------------------------------------
 
 class BanditLogger:
     """
-    Regista todas as decisões do bandit para avaliação quantitativa (Etapa 2).
+    Regista todas as decisões do bandit para avaliação quantitativa.
 
     Uso:
-        logger = BanditLogger("ThompsonSampling")
-        mood, extra = bandit.select_arm()
-        # ... reproduz música, obtém reward ...
-        logger.log(bandit, mood, reward, extra)
+        logger = BanditLogger("GaussianTS")
+        params, extra = bandit.select_params()
+        # ... reward ...
+        logger.log(bandit, params, reward, extra)
         logger.to_json("session_log.json")
     """
 
@@ -275,8 +436,8 @@ class BanditLogger:
 
     def log(
         self,
-        bandit: BaseBandit,
-        chosen_arm: str,
+        bandit,
+        params: MusicParams,
         reward: float,
         extra: dict,
     ) -> Decision:
@@ -284,7 +445,7 @@ class BanditLogger:
             step=bandit.step,
             timestamp=time.time(),
             algorithm=self.algorithm_name,
-            chosen_arm=chosen_arm,
+            params=params.to_dict(),
             reward=reward,
             cumulative_reward=bandit.cumulative_reward,
             arm_stats=bandit.arm_stats(),
@@ -303,29 +464,33 @@ class BanditLogger:
     def rewards_per_step(self) -> list[float]:
         return [d.reward for d in self.decisions]
 
-    def arm_selection_counts(self) -> dict[str, int]:
-        counts: dict[str, int] = {}
+    def mean_params_over_time(self) -> dict[str, list[float]]:
+        """Evolução de cada parâmetro ao longo dos steps — útil para visualização."""
+        result: dict[str, list[float]] = {}
         for d in self.decisions:
-            counts[d.chosen_arm] = counts.get(d.chosen_arm, 0) + 1
-        return counts
-
-    def arm_selection_pct(self) -> dict[str, float]:
-        counts = self.arm_selection_counts()
-        total  = sum(counts.values()) or 1
-        return {k: round(v / total * 100, 1) for k, v in counts.items()}
+            for k, v in d.params.items():
+                if isinstance(v, (int, float)):
+                    result.setdefault(k, []).append(v)
+        return result
 
     def summary(self) -> dict:
         if not self.decisions:
             return {"algorithm": self.algorithm_name, "total_steps": 0}
-        total = len(self.decisions)
+        total    = len(self.decisions)
+        last     = self.decisions[-1]
+        tail     = self.decisions[-10:]
+        avg_tail: dict[str, float] = {}
+        for k in last.params:
+            vals = [d.params[k] for d in tail if isinstance(d.params.get(k), (int, float))]
+            if vals:
+                avg_tail[k] = round(sum(vals) / len(vals), 3)
+
         return {
             "algorithm":             self.algorithm_name,
             "total_steps":           total,
-            "total_reward":          round(self.decisions[-1].cumulative_reward, 4),
-            "mean_reward_per_step":  round(
-                self.decisions[-1].cumulative_reward / total, 4
-            ),
-            "arm_selections_pct":    self.arm_selection_pct(),
+            "total_reward":          round(last.cumulative_reward, 4),
+            "mean_reward_per_step":  round(last.cumulative_reward / total, 4),
+            "converged_params":      avg_tail,
         }
 
     def print_summary(self):
@@ -333,9 +498,9 @@ class BanditLogger:
         print(f"\n  [{s['algorithm']}]  steps={s['total_steps']}"
               f"  reward={s.get('total_reward', 0):+.3f}"
               f"  média/step={s.get('mean_reward_per_step', 0):+.4f}")
-        for mood, pct in s.get("arm_selections_pct", {}).items():
-            bar = "█" * int(pct / 5)
-            print(f"    {mood:<12} {bar:<20} {pct:.1f}%")
+        print("  Parâmetros convergidos (últimas 10 decisões):")
+        for k, v in s.get("converged_params", {}).items():
+            print(f"    {k:<18} {v}")
 
     # ------------------------------------------------------------------
     # Persistência
@@ -364,13 +529,8 @@ class BanditLogger:
 
 class BanditEvaluator:
     """
-    Compara dois algoritmos lado a lado.
-    Serve para o ablation study da Etapa 2 (toggle Bandit on/off).
-
-    Uso:
-        evaluator = BanditEvaluator(ts_logger, random_logger)
-        evaluator.print_report()
-        evaluator.to_json("ablation_report.json")
+    Compara ContinuousGaussianBandit vs RandomContinuousBandit.
+    Interface idêntica à versão anterior para não quebrar o código do L.
     """
 
     def __init__(
@@ -387,37 +547,31 @@ class BanditEvaluator:
 
         a_reward = a.get("total_reward", 0.0)
         b_reward = b.get("total_reward", 0.0)
-        improvement_pct = (
-            (a_reward - b_reward) / (abs(b_reward) + 1e-9) * 100
-        )
+        improvement_pct = (a_reward - b_reward) / (abs(b_reward) + 1e-9) * 100
 
         return {
             "adaptive":        a,
             "baseline":        b,
             "improvement_pct": round(improvement_pct, 2),
-            "winner":          (
-                a["algorithm"] if a_reward > b_reward else b["algorithm"]
-            ),
+            "winner":          a["algorithm"] if a_reward > b_reward else b["algorithm"],
         }
 
     def print_report(self):
         report = self.compare()
         print("\n" + "=" * 60)
-        print("  📊  ABLATION STUDY — Adaptive vs Baseline")
+        print("  📊  ABLATION STUDY — Gaussian TS vs Random")
         print("=" * 60)
 
-        for label, key in [("Adaptativo", "adaptive"), ("Baseline (Random)", "baseline")]:
+        for label, key in [("Adaptativo (GaussianTS)", "adaptive"), ("Baseline (Random)", "baseline")]:
             s = report[key]
-            print(f"\n  {label}  [{s['algorithm']}]:")
-            print(f"    Total reward:   {s.get('total_reward', 0):+.4f}")
-            print(f"    Média/step:     {s.get('mean_reward_per_step', 0):+.4f}")
-            print(f"    Seleções:")
-            for mood, pct in s.get("arm_selections_pct", {}).items():
-                bar = "█" * int(pct / 5)
-                print(f"      {mood:<12} {bar:<20} {pct:.1f}%")
+            print(f"\n  {label}:")
+            print(f"    Total reward:  {s.get('total_reward', 0):+.4f}")
+            print(f"    Média/step:    {s.get('mean_reward_per_step', 0):+.4f}")
+            print(f"    Convergência:")
+            for k, v in s.get("converged_params", {}).items():
+                print(f"      {k:<18} {v}")
 
-        print(f"\n  Melhoria adaptativo vs baseline: "
-              f"{report['improvement_pct']:+.1f}%")
+        print(f"\n  Melhoria: {report['improvement_pct']:+.1f}%")
         print(f"  Vencedor: {report['winner']}")
         print("=" * 60)
 
@@ -425,54 +579,3 @@ class BanditEvaluator:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.compare(), f, indent=2)
         print(f"  [✓] Relatório guardado → {path}")
-
-
-# ---------------------------------------------------------------------------
-# Demo rápida (teste sem áudio)
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    import random
-
-    print("=== Teste do Bandit (simulação sem áudio) ===\n")
-
-    # Simula preferências do utilizador: happy e energetic têm reward maior
-    TRUE_REWARDS = {
-        "happy":     0.6,
-        "sad":    -0.2,
-        "calm":      0.1,
-        "energetic": 0.8,
-    }
-
-    def fake_reward(mood: str) -> float:
-        base  = TRUE_REWARDS[mood]
-        noise = random.gauss(0, 0.2)
-        return max(-1.0, min(1.0, base + noise))
-
-    N_STEPS = 40
-
-    # Corre UCB1, Thompson Sampling e Random em paralelo
-    bandits  = [UCB1Bandit(MOODS, c=1.5, seed=0),
-                ThompsonSamplingBandit(MOODS, seed=1),
-                RandomBandit(MOODS, seed=2)]
-    loggers  = [BanditLogger(b.name) for b in bandits]
-
-    for step in range(N_STEPS):
-        for bandit, logger in zip(bandits, loggers):
-            mood, extra = bandit.select_arm()
-            reward      = fake_reward(mood)
-            bandit.update(mood, reward)
-            logger.log(bandit, mood, reward, extra)
-
-    print("  Resultados após", N_STEPS, "passos:\n")
-    for logger in loggers:
-        logger.print_summary()
-
-    # Ablation study: Thompson vs Random
-    print()
-    evaluator = BanditEvaluator(loggers[1], loggers[2])
-    evaluator.print_report()
-
-    # Guarda logs
-    for logger in loggers:
-        logger.to_json(f"log_{logger.algorithm_name.lower()}.json")

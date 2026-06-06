@@ -5,15 +5,13 @@ Motor Adaptativo — Componente do João (J)
 Projeto: Adaptive Music Experience (C2)
 
 Liga o MIDIGenerator ao MIDIPlayer com Multi-Armed Bandit (Etapa 2):
-  - Seleção de mood via UCB1 ou Thompson Sampling (bandit.py)
-  - Parâmetros contínuos (BPM, density, complexity) adaptados por gradiente
+  - Seleção de parâmetros musicais via Gaussian Thompson Sampling (bandit.py)
+  - Espaço contínuo: BPM, density, complexity, octave, note_duration, velocity, scale
   - Logging de todas as decisões para avaliação quantitativa
   - Ablation study integrado: adaptativo vs baseline aleatório
 
 Corre com:
-    python adaptive_player.py                  # Thompson Sampling (default)
-    python adaptive_player.py --algo ucb1      # UCB1
-    python adaptive_player.py --algo random    # Baseline
+    python adaptive_player.py
 
 Dependências:
     pip install pygame pretty_midi numpy
@@ -31,8 +29,8 @@ from midi_generator import (
 )
 from midi_player import MIDIPlayer, TrackInfo, PlaybackSignals, PlayerState
 from bandit import (
-    UCB1Bandit, ThompsonSamplingBandit, RandomBandit,
-    BaseBandit, BanditLogger, BanditEvaluator, MOODS
+    ContinuousGaussianBandit, RandomContinuousBandit,
+    BanditLogger, BanditEvaluator, MusicParams
 )
 
 
@@ -40,66 +38,9 @@ from bandit import (
 # Configuração global
 # ---------------------------------------------------------------------------
 
-OUTPUT_DIR    = "adaptive_midi"  # onde guardar os .mid gerados
-QUEUE_MIN     = 5                # gera novas quando a fila fica abaixo disto
-LEARNING_RATE = 0.15             # quão depressa os parâmetros se adaptam
+OUTPUT_DIR = "adaptive_midi"  # onde guardar os .mid gerados
+QUEUE_MIN  = 5               # gera novas quando a fila fica abaixo disto
 
-
-# ---------------------------------------------------------------------------
-# Estado adaptativo por mood — parâmetros contínuos apenas
-# (estatísticas de recompensa e seleção de arm passaram para bandit.py)
-# ---------------------------------------------------------------------------
-
-class MoodState:
-    """
-    Mantém os parâmetros contínuos ideais por mood (BPM, density, complexity).
-    Atualiza-os por gradiente após cada recompensa.
-    A seleção de qual mood tocar a seguir é feita pelo bandit (bandit.py).
-    """
-
-    def __init__(self, mood: str, rng: np.random.Generator):
-        cfg = MOOD_CONFIGS[mood]
-        bpm_lo, bpm_hi = cfg["bpm_range"]
-        self.mood       = mood
-        self.rng        = rng
-        self.bpm        = float(np.mean([bpm_lo, bpm_hi]))
-        self.density    = cfg["density"]
-        self.complexity = cfg["complexity"]
-        self.repetition = 0.3
-        self._bpm_lo    = bpm_lo
-        self._bpm_hi    = bpm_hi
-
-    def update_params(self, reward: float, track_params: dict):
-        """
-        Ajusta os parâmetros na direção da faixa que gerou esta recompensa.
-        reward > 0 → aproxima parâmetros dos da faixa
-        reward < 0 → afasta parâmetros dos da faixa
-        """
-        lr = LEARNING_RATE * abs(reward)
-        self.bpm = float(np.clip(
-            self.bpm + lr * (track_params["bpm"] - self.bpm),
-            self._bpm_lo, self._bpm_hi
-        ))
-        self.density = float(np.clip(
-            self.density + lr * (track_params["density"] - self.density),
-            0.1, 1.0
-        ))
-        self.complexity = float(np.clip(
-            self.complexity + lr * (track_params["complexity"] - self.complexity),
-            0.0, 1.0
-        ))
-
-    def sample_params(self) -> dict:
-        """Amostra parâmetros com ruído gaussiano para garantir diversidade."""
-        noise = lambda v, s: float(np.clip(self.rng.normal(v, s), 0.05, 1.0))
-        return {
-            "bpm":        float(np.clip(self.rng.normal(self.bpm, 8.0),
-                                        self._bpm_lo, self._bpm_hi)),
-            "density":    noise(self.density,    0.08),
-            "complexity": noise(self.complexity, 0.08),
-            "repetition": float(np.clip(self.rng.normal(self.repetition, 0.05),
-                                        0.1, 0.7)),
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +61,6 @@ class AdaptiveEngine:
     def __init__(
         self,
         output_dir: str = OUTPUT_DIR,
-        algo: str = "thompson",   # "thompson" | "ucb1" | "random"
         seed: int = 42,
     ):
         self.rng        = np.random.default_rng(seed)
@@ -128,18 +68,13 @@ class AdaptiveEngine:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-        # Parâmetros contínuos por mood (BPM, density, complexity)
-        self.mood_states: dict[str, MoodState] = {
-            m: MoodState(m, self.rng) for m in MOODS
-        }
-
         # ── Bandit (Etapa 2) ─────────────────────────────────────────
-        self.bandit: BaseBandit = self._build_bandit(algo, seed)
-        self.logger             = BanditLogger(self.bandit.name)
+        self.bandit = ContinuousGaussianBandit(seed=seed)
+        self.logger = BanditLogger(self.bandit.name)
 
         # Baseline paralelo para o ablation study (sempre Random)
-        self.baseline_bandit = RandomBandit(MOODS, seed=seed + 1)
-        self.baseline_logger = BanditLogger("Random_baseline")
+        self.baseline_bandit = RandomContinuousBandit(seed=seed + 1)
+        self.baseline_logger = BanditLogger("RandomContinuous_baseline")
         # ─────────────────────────────────────────────────────────────
 
         self.history: list[dict] = []
@@ -173,7 +108,6 @@ class AdaptiveEngine:
 
     def process_api_feedback(self, mood: str, track_params: dict, feedback_value: str):
         """Nova função para processar feedback vindo dos endpoints da API."""
-        # Mapear o feedback do frontend para a recompensa do Bandit
         if feedback_value == "like":
             reward = 1.0
         elif feedback_value == "dislike":
@@ -181,18 +115,25 @@ class AdaptiveEngine:
         elif feedback_value == "skip":
             reward = -0.5
         else:
-            reward = 0.5 # Default/fim natural
-            
+            reward = 0.5  # Default/fim natural
+
+        played_params = MusicParams(
+            bpm        = track_params.get("bpm",        85.0),
+            density    = track_params.get("density",    0.5),
+            complexity = track_params.get("complexity", 0.5),
+        )
+
         with self._lock:
             # 1. Atualizar o Bandit
-            self.bandit.update(mood, reward)
-            
-            # 2. Atualizar parâmetros contínuos
-            self.mood_states[mood].update_params(reward, track_params)
-            
-            # 3. Guardar log
-            self.logger.log(self.bandit, mood, reward, getattr(self, "_last_extra", {}))
-            self.history.append({"mood": mood, "reward": round(reward, 3), "api_feedback": feedback_value})
+            self.bandit.update(played_params, reward)
+
+            # 2. Guardar log
+            self.logger.log(self.bandit, played_params, reward,
+                            getattr(self, "_last_extra", {}))
+            self.history.append({
+                "mood": mood, "reward": round(reward, 3),
+                "api_feedback": feedback_value,
+            })
 
     # ------------------------------------------------------------------
     # CLI
@@ -202,18 +143,8 @@ class AdaptiveEngine:
         print("  Comandos:")
         # ... continuação do código original ...
 
-    @staticmethod
-    def _build_bandit(algo: str, seed: int) -> BaseBandit:
-        algo = algo.lower()
-        if algo == "ucb1":
-            return UCB1Bandit(MOODS, c=1.5, seed=seed)
-        if algo == "random":
-            return RandomBandit(MOODS, seed=seed)
-        return ThompsonSamplingBandit(MOODS, seed=seed)  # default
 
-    # ------------------------------------------------------------------
-    # Arranque
-    # ------------------------------------------------------------------
+
 
     def start(self):
         """Gera batch inicial e arranca a reprodução."""
@@ -229,59 +160,99 @@ class AdaptiveEngine:
     def _generate_cold_start(self):
         """Uma faixa por mood para arrancar sem dados."""
         print("  [cold start] A gerar uma faixa por mood...\n")
-        for mood in MOODS:
-            track = self._generate_track(mood)
+        for mood in ["happy", "sad", "calm", "energetic"]:
+            track = self._generate_track_for_mood(mood)
             self.player.add_to_queue(track)
 
-    def _generate_track(self, mood: str) -> TrackInfo:
-        """Gera uma faixa para o mood dado e devolve um TrackInfo."""
-        state  = self.mood_states[mood]
-        p      = state.sample_params()
-        idx    = self._track_counter
-
-        root       = str(self.rng.choice(_VARIATION_ROOTS))
-        instrument = int(self.rng.choice(_MOOD_INSTRUMENTS[mood]))
+    def _generate_track_for_mood(self, mood: str) -> TrackInfo:
+        """Gera uma faixa para o mood dado."""
+        cfg            = MOOD_CONFIGS[mood]
+        bpm_lo, bpm_hi = cfg["bpm_range"]
+        idx            = self._track_counter
+        root           = str(self.rng.choice(_VARIATION_ROOTS))
+        instrument     = int(self.rng.choice(_MOOD_INSTRUMENTS[mood]))
+        bpm            = float(self.rng.uniform(bpm_lo, bpm_hi))
 
         params = GeneratorParams(
             mood=mood,
-            bpm=p["bpm"],
-            density=p["density"],
-            complexity=p["complexity"],
-            repetition=p["repetition"],
+            bpm=bpm,
+            density=cfg["density"],
+            complexity=cfg["complexity"],
+            repetition=0.3,
             duration_bars=int(self.rng.choice([8, 12, 16])),
             root_note=root,
             instrument_program=instrument,
         )
 
-        mood_dir = self.output_dir
-        os.makedirs(mood_dir, exist_ok=True)
-        filename = f"{mood}_{idx:04d}_{root}_{int(p['bpm'])}bpm.mid"
-        path     = os.path.join(mood_dir, filename)
+        os.makedirs(self.output_dir, exist_ok=True)
+        filename = f"{mood}_{idx:04d}_{root}_{int(bpm)}bpm.mid"
+        path     = os.path.join(self.output_dir, filename)
         self.generator.generate(params, output_path=path)
 
-        with open(path, "rb") as midi_file:
-            # Lemos os binários, codificamos em base64 e convertemos para string de texto
-            encoded_midi = base64.b64encode(midi_file.read()).decode("utf-8")
-        print(encoded_midi)
         self._track_counter += 1
+
+        with open(path, "rb") as midi_file:
+            encoded_midi = base64.b64encode(midi_file.read()).decode("utf-8")
 
         return TrackInfo(
             id=idx, path=path, mood=mood,
-            bpm=p["bpm"], density=p["density"], complexity=p["complexity"], base64_file=encoded_midi
+            bpm=bpm, density=cfg["density"], complexity=cfg["complexity"], base64_file=encoded_midi,
         )
 
-    def _pick_mood(self) -> tuple[str, dict]:
-        """Delega a seleção de mood ao bandit configurado."""
-        return self.bandit.select_arm()
+    def _generate_track(self, music_params: MusicParams) -> TrackInfo:
+        """Gera uma faixa a partir de um MusicParams do bandit e devolve um TrackInfo."""
+        p   = music_params.to_generator_dict()
+        idx = self._track_counter
+
+        root       = str(self.rng.choice(_VARIATION_ROOTS))
+
+        mood       = "calm"   # fallback neutro para _MOOD_INSTRUMENTS
+        instrument = int(self.rng.choice(_MOOD_INSTRUMENTS[mood]))
+
+        bpm_lo, bpm_hi = p["bpm_range"]
+        bpm = float(self.rng.uniform(bpm_lo, bpm_hi))
+
+        params = GeneratorParams(
+            mood=mood,
+            bpm=bpm,
+            density=p["density"],
+            complexity=p["complexity"],
+            repetition=0.3,
+            duration_bars=int(self.rng.choice([8, 12, 16])),
+            root_note=root,
+            instrument_program=instrument,
+        )
+
+        os.makedirs(self.output_dir, exist_ok=True)
+        filename = f"track_{idx:04d}_{root}_{int(bpm)}bpm_{music_params.scale}.mid"
+        path     = os.path.join(self.output_dir, filename)
+        self.generator.generate(params, output_path=path)
+
+        self._track_counter += 1
+
+        with open(path, "rb") as midi_file:
+            encoded_midi = base64.b64encode(midi_file.read()).decode("utf-8")
+        print("encoded_midi", encoded_midi)
+
+        return TrackInfo(
+            id=idx, path=path, mood=mood,
+            bpm=bpm, density=p["density"], complexity=p["complexity"], base64_file=encoded_midi,
+        )
+
+    def _pick_params(self) -> tuple[MusicParams, dict]:
+        """Delega a seleção de parâmetros ao bandit contínuo."""
+        return self.bandit.select_params()
 
     def _maybe_fill_queue(self):
         """Se a fila estiver curta, gera mais uma faixa adaptada."""
         if self.player.queue_length < QUEUE_MIN:
-            mood, extra = self._pick_mood()
-            track       = self._generate_track(mood)
+            music_params, extra = self._pick_params()
+            track               = self._generate_track(music_params)
             self.player.add_to_queue(track)
-            print(f"\n  🎲  [{self.bandit.name}] Nova faixa → [{mood.upper()}]"
-                  f" {os.path.basename(track.path)}")
+            print(f"\n  🎲  [{self.bandit.name}] Nova faixa → BPM≈{music_params.bpm:.0f}"
+                  f"  density={music_params.density:.2f}"
+                  f"  scale={music_params.scale}"
+                  f"  {os.path.basename(track.path)}")
 
     # ------------------------------------------------------------------
     # Callbacks do player
@@ -295,6 +266,7 @@ class AdaptiveEngine:
         
         # 1. Descobre a pasta exata onde este script (adaptive_player.py) está
         base_dir = os.path.dirname(os.path.abspath(__file__))
+        print(base_dir)
         
         # 2. Constrói o caminho fixo para a pasta "start_tracks"
         target_dir = os.path.join(base_dir, "start_tracks")
@@ -326,12 +298,10 @@ class AdaptiveEngine:
                     except ValueError:
                         pass
 
-                    # 3. Ler o ficheiro físico e converter para Base64
                     with open(path, "rb") as midi_file:
-                        # Lemos os binários, codificamos em base64 e convertemos para string de texto
                         encoded_midi = base64.b64encode(midi_file.read()).decode("utf-8")
 
-                    # 4. Construir o payload para o frontend
+                    # 3. Construir o payload para o frontend
                     tracks_data.append({
                         "id": track_id,
                         "path": path,
@@ -352,30 +322,33 @@ class AdaptiveEngine:
             "density":    track.density,
             "complexity": track.complexity,
         }
-        # Pré-seleciona o próximo mood e guarda o extra para o logger
+        # Pré-seleciona os próximos parâmetros e guarda o extra para o logger
         try:
-            _next_mood, self._last_extra = self.bandit.select_arm()
+            _next_params, self._last_extra = self.bandit.select_params()
         except Exception:
             self._last_extra = {}
 
     def _on_track_end(self, signals: PlaybackSignals):
-        """Calcula recompensa, actualiza bandit + parâmetros, loga e gera nova faixa."""
+        """Calcula recompensa, actualiza bandit, loga e gera nova faixa."""
         reward = self._compute_reward(signals)
-        mood   = signals.mood
+
+        # Reconstrói um MusicParams mínimo a partir dos parâmetros da faixa terminada
+        last = self._last_track_params
+        played_params = MusicParams(
+            bpm        = last.get("bpm",        85.0),
+            density    = last.get("density",    0.5),
+            complexity = last.get("complexity", 0.5),
+        )
 
         with self._lock:
             # 1. Atualiza o bandit adaptativo e loga a decisão
-            self.bandit.update(mood, reward)
-            mood_extra = {}  # extra vem do select_arm anterior (guardado no _last_extra)
-            self.logger.log(self.bandit, mood, reward,
+            self.bandit.update(played_params, reward)
+            self.logger.log(self.bandit, played_params, reward,
                             getattr(self, "_last_extra", {}))
 
-            # 2. Atualiza o baseline em paralelo (mesmo mood, mesma reward)
-            self.baseline_bandit.update(mood, reward)
-            self.baseline_logger.log(self.baseline_bandit, mood, reward, {})
-
-            # 3. Ajusta parâmetros contínuos do mood
-            self.mood_states[mood].update_params(reward, self._last_track_params)
+            # 2. Atualiza o baseline em paralelo (mesmos parâmetros, mesma reward)
+            self.baseline_bandit.update(played_params, reward)
+            self.baseline_logger.log(self.baseline_bandit, played_params, reward, {})
 
             record = {**signals.to_dict(), "reward": round(reward, 3)}
             self.history.append(record)
@@ -434,28 +407,21 @@ class AdaptiveEngine:
 
                 elif cmd == "+":
                     self.player.like()
-                    # Reage imediatamente: gera já uma faixa do mesmo mood
-                    current = self.player.current_track
-                    if current:
-                        mood  = current.mood
-                        track = self._generate_track(mood)
-                        self.player.add_to_queue(track)
-                        print(f"\n  ✨  Like! Nova faixa [{mood.upper()}] adicionada:"
-                              f" {os.path.basename(track.path)}")
+                    # Reage imediatamente: gera já uma faixa com parâmetros semelhantes
+                    music_params, _ = self._pick_params()
+                    track = self._generate_track(music_params)
+                    self.player.add_to_queue(track)
+                    print(f"\n  ✨  Like! Nova faixa adicionada:"
+                          f" {os.path.basename(track.path)}")
 
                 elif cmd == "-":
                     self.player.dislike()
-                    # Reage imediatamente: gera uma faixa de mood diferente
-                    current = self.player.current_track
-
-                    if current:
-                        other_moods = [m for m in MOODS if m != current.mood]
-                        mood, _extra = self._pick_mood()
-                        track = self._generate_track(mood)
-                        self.player.add_to_queue(track)
-                        
-                        print(f"\n  🔄  Dislike! Nova faixa [{mood.upper()}] adicionada:"
-                              f" {os.path.basename(track.path)}")
+                    # Reage imediatamente: deixa o bandit explorar uma zona diferente
+                    music_params, _ = self._pick_params()
+                    track = self._generate_track(music_params)
+                    self.player.add_to_queue(track)
+                    print(f"\n  🔄  Dislike! Nova faixa adicionada:"
+                          f" {os.path.basename(track.path)}")
 
                 elif cmd == "v+":
                     self.player.set_volume(min(1.0, self.player.volume + 0.1))
@@ -488,26 +454,25 @@ class AdaptiveEngine:
     def _print_feedback_summary(self, signals: PlaybackSignals, reward: float):
         emoji = "👍" if signals.liked else ("👎" if signals.disliked else
                 ("⏭" if signals.skipped else "✅"))
-        state = self.mood_states[signals.mood]
-        arm   = self.bandit.arms[signals.mood]
+        stats = self.bandit.arm_stats()["params"]
         print(f"\n  {emoji}  reward={reward:+.2f}"
-              f" | [{signals.mood}] BPM≈{state.bpm:.0f}"
-              f"  dens≈{state.density:.2f}"
-              f"  cmplx≈{state.complexity:.2f}"
-              f"  (plays={arm.plays}  μ={arm.mean_reward:+.3f})")
+              f" | BPM≈{stats['bpm']['mu']:.0f}"
+              f"  dens≈{stats['density']['mu']:.2f}"
+              f"  cmplx≈{stats['complexity']['mu']:.2f}"
+              f"  (step={self.bandit.step})")
 
     def _print_state(self):
-        """Mostra estado do bandit + parâmetros contínuos por mood."""
-        print(f"\n  Algoritmo: {self.bandit.name}")
-        print(f"  {'MOOD':<12} {'plays':>6} {'μ reward':>9} {'BPM':>7}"
-              f" {'density':>8} {'complexity':>11} {'α':>6} {'β':>6}")
-        print("  " + "-" * 70)
-        for mood in MOODS:
-            arm   = self.bandit.arms[mood]
-            state = self.mood_states[mood]
-            print(f"  {mood:<12} {arm.plays:>6} {arm.mean_reward:>+9.3f}"
-                  f" {state.bpm:>7.1f} {state.density:>8.3f}"
-                  f" {state.complexity:>11.3f} {arm.alpha:>6.1f} {arm.beta:>6.1f}")
+        """Mostra estado do bandit — médias e incertezas por parâmetro."""
+        stats = self.bandit.arm_stats()
+        print(f"\n  Algoritmo: {self.bandit.name}  (step={self.bandit.step})")
+        print(f"  {'PARÂMETRO':<18} {'μ (média)':>10} {'σ (incert.)':>12} {'plays':>7}")
+        print("  " + "-" * 52)
+        for name, s in stats["params"].items():
+            print(f"  {name:<18} {s['mu']:>10.3f} {s['std']:>12.4f} {s['plays']:>7}")
+        print(f"\n  Escalas (prob. preferida):")
+        for scale, info in stats["scales"].items():
+            bar = "█" * int(info["mean"] * 20)
+            print(f"    {scale:<22} {bar:<20} {info['mean']:.2f}")
         print(f"\n  Fila: {self.player.queue_length} faixa(s)"
               f"  |  Geradas: {self._track_counter}"
               f"  |  Reward acumulada: {self.bandit.cumulative_reward:+.3f}")
@@ -534,12 +499,7 @@ class AdaptiveEngine:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    algo = "thompson"
-    if "--algo" in sys.argv:
-        idx  = sys.argv.index("--algo")
-        algo = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else "thompson"
-
-    engine = AdaptiveEngine(output_dir="adaptive_midi", algo=algo, seed=42)
+    engine = AdaptiveEngine(output_dir="adaptive_midi", seed=42)
     engine.start()
 
     # Ablation study automático no fim da sessão
@@ -547,4 +507,4 @@ if __name__ == "__main__":
         evaluator = BanditEvaluator(engine.logger, engine.baseline_logger)
         evaluator.print_report()
         evaluator.to_json("ablation_report.json")
-        engine.logger.to_json(f"log_{algo}.json")
+        engine.logger.to_json("log_gaussian_ts.json")
