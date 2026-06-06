@@ -23,6 +23,8 @@ Nota sobre soundfonts:
 """
 
 import os
+import base64
+import tempfile
 import time
 import threading
 import pygame
@@ -43,13 +45,21 @@ class PlayerState(Enum):
 
 @dataclass
 class TrackInfo:
-    """Metadados de uma faixa na fila."""
+    """Metadados de uma faixa na fila.
+
+    O áudio pode ser fornecido de duas formas (por prioridade):
+      1. base64_file — conteúdo MIDI codificado em Base64 (sem caminho em disco).
+         O player descodifica para um ficheiro temporário antes de tocar.
+      2. path — caminho para um ficheiro .mid em disco (comportamento original).
+    """
     id: int
-    path: str
+    path: str = ""
     mood: str = "desconhecido"
     bpm: float = 120.0
     density: float = 0.5
     complexity: float = 0.5
+    base64_file: str = ""  # MIDI codificado em Base64; tem prioridade sobre `path`
+    
 
 
 @dataclass
@@ -150,7 +160,8 @@ class MIDIPlayer:
             pygame.mixer.music.unpause()
             self._start_time = time.time()  # reinicia contagem do tempo paused
             self._state = PlayerState.PLAYING
-            print(f"  ▶  A retomar: {self._current.path}")
+            label = self._current.path or f"[b64 id={self._current.id}]"
+            print(f"  ▶  A retomar: {label}")
             return
 
         if self._state == PlayerState.STOPPED:
@@ -176,7 +187,8 @@ class MIDIPlayer:
     def skip(self):
         """Salta para a próxima faixa e regista o skip."""
         if self._current:
-            print(f"  ⏭  Skip: {self._current.path}")
+            label = self._current.path or f"[b64 id={self._current.id}]"
+            print(f"  ⏭  Skip: {label}")
         self._finalise_signals(skipped=True)
         pygame.mixer.music.stop()
         self._play_next()
@@ -235,7 +247,13 @@ class MIDIPlayer:
     # ------------------------------------------------------------------
 
     def _play_next(self):
-        """Carrega e toca a próxima faixa da fila."""
+        """Carrega e toca a próxima faixa da fila.
+
+        Se ``track.base64_file`` estiver preenchido, descodifica o conteúdo
+        Base64 para um ficheiro temporário e carrega-o no mixer.
+        Caso contrário usa ``track.path`` como antes.
+        O ficheiro temporário é apagado automaticamente após o carregamento.
+        """
         with self._lock:
             if not self._queue:
                 self._state = PlayerState.STOPPED
@@ -243,10 +261,38 @@ class MIDIPlayer:
                 return
             track = self._queue.pop(0)
 
-        if not os.path.exists(track.path):
-            print(f"  [!] Ficheiro não encontrado: {track.path}. A saltar.")
-            self._play_next()
-            return
+        # --- Resolve o caminho de áudio a usar ----------------------------
+        load_path: str
+
+        if track.base64_file:
+            # Descodifica Base64 → ficheiro temporário em disco
+            try:
+                midi_bytes = base64.b64decode(track.base64_file)
+            except Exception as exc:
+                print(f"  [!] Erro ao descodificar base64_file (id={track.id}): {exc}. A saltar.")
+                self._play_next()
+                return
+
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".mid", delete=False, prefix="amx_track_"
+            )
+            try:
+                tmp.write(midi_bytes)
+                tmp.flush()
+                load_path = tmp.name
+            finally:
+                tmp.close()
+
+            _tmp_to_delete = load_path  # apagado abaixo, após load()
+        else:
+            # Comportamento original: usa path em disco
+            if not os.path.exists(track.path):
+                print(f"  [!] Ficheiro não encontrado: {track.path}. A saltar.")
+                self._play_next()
+                return
+            load_path = track.path
+            _tmp_to_delete = None
+        # ------------------------------------------------------------------
 
         self._current      = track
         self._signals      = PlaybackSignals(track_id=track.id, mood=track.mood)
@@ -254,10 +300,18 @@ class MIDIPlayer:
         self._paused_accum = 0.0
         self._state        = PlayerState.PLAYING
 
-        pygame.mixer.music.load(track.path)
+        pygame.mixer.music.load(load_path)
         pygame.mixer.music.play()
 
-        print(f"\n  ▶  A tocar: [{track.mood.upper()}] {os.path.basename(track.path)}"
+        # Remove o ficheiro temporário (já foi carregado para a memória do mixer)
+        if _tmp_to_delete:
+            try:
+                os.unlink(_tmp_to_delete)
+            except OSError:
+                pass
+
+        display_name = os.path.basename(load_path) if track.base64_file else os.path.basename(track.path)
+        print(f"\n  ▶  A tocar: [{track.mood.upper()}] {display_name}"
               f"  |  BPM={track.bpm:.0f}  density={track.density:.1f}"
               f"  complexity={track.complexity:.1f}")
 

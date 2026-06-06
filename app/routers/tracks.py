@@ -5,6 +5,7 @@ from typing import List
 from models import GenerateRequest, TrackResponse, StarterSong, Mood, FeedbackSignal, FeedbackValue
 from storage import store_starter_song, get_starter_songs, store_feedback
 import os
+import base64
 
 router = APIRouter()
 
@@ -36,16 +37,16 @@ def generate_track(request: Request):
     track_info = engine._generate_track(chosen_mood)
     
     filename = os.path.basename(track_info.path)
-    file_url = f"{request.base_url}midi/{filename}"
-    
     print(f"✅ Faixa gerada: {filename} (Mood: {chosen_mood}, BPM: {track_info.bpm}, Density: {track_info.density})")
+    print(track_info)
+
     return {
         "track_id": str(track_info.id),
         "name": filename,
         "bpm": int(track_info.bpm),
         "density": track_info.density,
         "mood": chosen_mood,
-        "url": file_url
+        "base64_file": track_info.base64_file,
     }
 
 @router.get("/starter", response_model=List[StarterSong], summary="Buscar starter songs (usado pelo front-end)")

@@ -24,6 +24,7 @@ import sys
 import time
 import threading
 import numpy as np
+import base64
 
 from midi_generator import (
     MIDIGenerator, GeneratorParams, MOOD_CONFIGS, _VARIATION_ROOTS, _MOOD_INSTRUMENTS
@@ -258,10 +259,15 @@ class AdaptiveEngine:
         path     = os.path.join(mood_dir, filename)
         self.generator.generate(params, output_path=path)
 
+        with open(path, "rb") as midi_file:
+            # Lemos os binários, codificamos em base64 e convertemos para string de texto
+            encoded_midi = base64.b64encode(midi_file.read()).decode("utf-8")
+        print(encoded_midi)
         self._track_counter += 1
+
         return TrackInfo(
             id=idx, path=path, mood=mood,
-            bpm=p["bpm"], density=p["density"], complexity=p["complexity"],
+            bpm=p["bpm"], density=p["density"], complexity=p["complexity"], base64_file=encoded_midi
         )
 
     def _pick_mood(self) -> tuple[str, dict]:
@@ -289,7 +295,6 @@ class AdaptiveEngine:
         
         # 1. Descobre a pasta exata onde este script (adaptive_player.py) está
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        print(base_dir)
         
         # 2. Constrói o caminho fixo para a pasta "start_tracks"
         target_dir = os.path.join(base_dir, "start_tracks")
@@ -321,19 +326,26 @@ class AdaptiveEngine:
                     except ValueError:
                         pass
 
-                    # 3. Construir o payload para o frontend
+                    # 3. Ler o ficheiro físico e converter para Base64
+                    with open(path, "rb") as midi_file:
+                        # Lemos os binários, codificamos em base64 e convertemos para string de texto
+                        encoded_midi = base64.b64encode(midi_file.read()).decode("utf-8")
+
+                    # 4. Construir o payload para o frontend
                     tracks_data.append({
                         "id": track_id,
                         "path": path,
                         "filename": file,
                         "mood": mood,
                         "bpm": bpm,
+                        "base64_file": encoded_midi,
                         "source": "pre_generated"
                     })
                     track_id += 1
                         
         print(f"  [✓] Foram prontas {len(tracks_data)} músicas da pasta start_tracks.")
         return tracks_data
+    
     def _on_track_start(self, track: TrackInfo):
         self._last_track_params = {
             "bpm":        track.bpm,

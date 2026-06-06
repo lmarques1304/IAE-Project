@@ -14,6 +14,8 @@ Dependências:
   pip install pretty_midi numpy
 """
 
+import base64
+
 import pretty_midi
 import numpy as np
 import os
@@ -197,6 +199,7 @@ class MIDIGenerator:
 
         midi.instruments.extend([melody_track, harmony_track, drum_track])
         midi.write(output_path)
+
         return output_path
 
     # ------------------------------------------------------------------

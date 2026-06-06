@@ -45,13 +45,15 @@ class GenerateRequest(BaseModel):
     mood: Mood
     bpm: Optional[int] = Field(None, ge=40, le=200, description="Se não fornecido, o sistema escolhe com base no mood")
     density: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Densidade de notas (0=esparso, 1=denso)")
+    base64_file: Optional[str] = Field(None, description="Conteúdo do ficheiro MIDI codificado em base64 (usado para faixas pré-geradas)")
 
     class Config:
         json_schema_extra = {
             "example": {
                 "mood": "Calm",
                 "bpm": 75,
-                "density": 0.4
+                "density": 0.4,
+                "base64_file": "base64_encoded_file_content",
             }
         }
 
@@ -61,7 +63,7 @@ class TrackResponse(BaseModel):
     bpm: int
     density: float
     name: str
-    url: str
+    base64_file: str
 
 class StarterSong(BaseModel):
     track_id: str
@@ -69,4 +71,4 @@ class StarterSong(BaseModel):
     bpm: int
     density: float
     name: str
-    url: str
+    base64_file: str

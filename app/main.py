@@ -23,6 +23,7 @@ async def lifespan(app: FastAPI):
     
     # 3. Format and store them in memory so GET /tracks/starter works
     for track in starter_tracks:
+
         # We format the dictionary to match your StarterSong Pydantic model
         song_data = {
             "track_id": f"PRE_{track['id']}", # Make sure it's a string
@@ -30,7 +31,7 @@ async def lifespan(app: FastAPI):
             "bpm": int(track["bpm"]),
             "density": 0.5, # Default density since it isn't in the filename
             "name": track["filename"],
-            "url": f"/start_tracks/{track['filename']}"
+            "base64_file": track["base64_file"]
         }
         store_starter_song(song_data)
 
